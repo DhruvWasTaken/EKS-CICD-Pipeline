@@ -1,0 +1,12 @@
+replicas: 3
+
+# Service Specific Values
+nodejs:
+  image: '$REPO_URI'
+  tag: '$IMAGE_TAG_NODE'
+crystal:
+  image: '$REPO_URI'
+  tag: '$IMAGE_TAG_CRYS'
+frontend:
+  image: '$REPO_URI'
+  tag: '$IMAGE_TAG_FRONT'

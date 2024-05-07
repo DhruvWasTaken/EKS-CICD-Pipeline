@@ -1,0 +1,89 @@
+version: 0.2
+run-as: root
+env:
+#   variables:
+    # IMAGE_TAG: $IMAGE_TAG
+  exported-variables:
+    - IMAGE_TAG_NODE
+    - IMAGE_TAG_CRYS
+    - IMAGE_TAG_FRONT
+    - ELB_URL
+phases:
+
+  install:
+    commands:
+      - echo Installing app dependencies...
+      - curl -o kubectl https://s3.us-west-2.amazonaws.com/amazon-eks/1.21.2/2021-07-05/bin/linux/amd64/kubectl
+      - chmod +x ./kubectl
+      - mkdir -p $HOME/bin && cp ./kubectl $HOME/bin/kubectl && export PATH=$PATH:$HOME/bin
+      - echo 'export PATH=$PATH:$HOME/bin' >> ~/.bashrc
+      - source ~/.bashrc
+      - echo 'Check kubectl version'
+      - kubectl version --short --client
+      - chmod +x prereqs.sh
+      - sh prereqs.sh
+      - curl -sSL https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 | bash
+      - helm version --short
+
+
+  pre_build:
+    commands:
+      - echo ASSUMING ROLE, crossAccont
+      - CREDENTIALS=$(aws sts assume-role --role-arn $EKS_KUBECTL_ROLE_ARN --role-session-name codebuild-kubectl-prod --duration-seconds 1500)
+      - export AWS_ACCESS_KEY_ID="$(echo ${CREDENTIALS} | jq -r '.Credentials.AccessKeyId')"
+      - export AWS_SECRET_ACCESS_KEY="$(echo ${CREDENTIALS} | jq -r '.Credentials.SecretAccessKey')"
+      - export AWS_SESSION_TOKEN="$(echo ${CREDENTIALS} | jq -r '.Credentials.SessionToken')"
+      - export AWS_EXPIRATION=$(echo ${CREDENTIALS} | jq -r '.Credentials.Expiration')
+      - echo Logging in to Amazon EKS...
+      - aws eks --region $AWS_DEFAULT_REGION update-kubeconfig --name $AWS_CLUSTER_NAME
+      - echo check config
+      - kubectl config view --minify
+      - echo check kubectl access
+      - kubectl get svc
+    #   - export IMAGE_TAG=$(cat output.json)
+      # - export ECR_IMAGE_TAG=$IMAGE_TAG
+      # - echo $IMAGE_TAG
+      # - echo $ECR_IMAGE_TAG
+      - echo $IMAGE_TAG_NODE
+      - echo $IMAGE_TAG_CRYS
+      - echo $IMAGE_TAG_FRONT
+
+  build:
+    commands:
+      - echo Updating Values.yaml file with ENV
+      - envsubst < Helm/app/templateValue.yaml > Helm/app/values.yaml
+      - echo VALUES
+      - cat Helm/app/values.yaml
+      - echo deploying helm chart
+      - cat Helm/app/values.yaml
+      - helm install --debug --dry-run gcci Helm/app
+      - |
+        checksvcexist=$(eval kubectl get svc | grep ecsdemo-frontend)
+        if [ $? -ne "0" ]; then
+        echo "not exists"
+        helm install gcci Helm/app
+        else
+        echo "exists"
+        helm upgrade gcci Helm/app
+        fi
+      - |
+      - kubectl get po,deploy
+      # - kubectl wait --for=condition=ready pod -l app="guestbook"
+      - kubectl get svc
+      - sleep 180
+
+  post_build:
+    commands:
+      - kubectl get svc
+      - |
+        while [ -z $ELB_URL ]; do
+            echo "Waiting for external IP"
+            ELB_URL=$(kubectl get svc ecsdemo-frontend -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+            [ -z "ELB_URL" ] && sleep 10
+            echo $ELB_URL
+        done
+      - |
+      - ELB_URL=$(kubectl get svc ecsdemo-frontend  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+      - RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" $ELB_URL)
+      - echo $RESPONSE
+      - echo done........

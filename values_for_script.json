@@ -1,0 +1,9 @@
+{
+  "EKS_TEST_CLUSTER":"test",
+  "EKS_PROD_CLUSTER":"prod",
+  "AWS_REGION_TEST":"us-east-2",
+  "AWS_REGION_PROD":"eu-west-1",
+  "EKS_Role_arn_to_be_added":"arn:aws:iam::XXXXXXXXXXXX:role/eksworkshop-admin",
+  "CFN_STACK_NAME":"testprojectcfnstack",
+  "USER_EMAIL":"johndoe@mail.com"
+}

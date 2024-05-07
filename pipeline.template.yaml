@@ -1,0 +1,1228 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Parameters:
+    CodeCommitRepositoryName:
+        Description: CodeComit repository name
+        Type: String
+        Default: myrepo
+    ECRRepositoryName:
+        Description: ECR repository name
+        Type: String
+        Default: myecrrepo
+    TestEKSClusterName:
+        Description: EKS test cluster name
+        Type: String
+        Default: eksworkshop-test
+    ProdRegion:
+        MaxLength: '64'
+        Type: String
+    ProdEKSClusterName:
+        Description: EKS Prod cluster name
+        Type: String
+        Default: eksworkshop-prod
+    RoleARNForProdEKSCluster:
+        Description: ARN of role, which is allowed to make changes to EKS cluster, and is added in AWS AUTH CONFIGMAP
+        Type: String
+        Default: arn:aws:iam::XXXXXXXXXXXX:role/allaccessnow
+    RoleARNForTestEKSCluster:
+        Description: ARN of role, which is allowed to make changes to EKS cluster, and is added in AWS AUTH CONFIGMAP
+        Type: String
+        Default: arn:aws:iam::XXXXXXXXXXXX:role/eksworkshop-admin
+    EMAIL:
+        Description: Email to send notification on pipeline changes.
+        Type: String
+        Default: test@mail.com
+
+
+Resources:
+
+    S3BucketPipeline:
+        Type: 'AWS::S3::Bucket'
+        DeletionPolicy: Retain
+        Metadata:
+            cfn_nag:
+                rules_to_suppress:
+                  - id: W51
+        Properties:
+          BucketName: !Sub "aws-${AWS::Region}-pipeline-gcci-${AWS::AccountId}"
+          BucketEncryption:
+                ServerSideEncryptionConfiguration:
+                  -
+                    ServerSideEncryptionByDefault:
+                        SSEAlgorithm: "AES256"
+                    BucketKeyEnabled: false
+          LoggingConfiguration:
+                DestinationBucketName: !Ref S3BucketAccessLogging
+
+    S3BucketAccessLogging:
+        Type: "AWS::S3::Bucket"
+        Metadata:
+            cfn_nag:
+                rules_to_suppress:
+                  # - id: W35
+                  #   reason: "This is a logging bucket, which is why logging for this is Disabled."
+                  - id: W51
+        Properties:
+            BucketName: !Sub "aws-${AWS::Region}-accesslogs-gcci-${AWS::AccountId}"
+            BucketEncryption:
+                ServerSideEncryptionConfiguration:
+                  -
+                    ServerSideEncryptionByDefault:
+                        SSEAlgorithm: "AES256"
+                    BucketKeyEnabled: false
+
+
+    EventsRule:
+        Type: "AWS::Events::Rule"
+        Properties:
+            Name: "codepipeline-automate-rule"
+            Description: "Amazon CloudWatch Events rule to automatically start your pipeline when a change occurs in the AWS CodeCommit source repository and branch. Deleting this may prevent changes from being detected in that pipeline. Read more: http://docs.aws.amazon.com/codepipeline/latest/userguide/pipelines-about-starting.html"
+            EventPattern: !Sub "{\"source\":[\"aws.codecommit\"],\"detail-type\":[\"CodeCommit Repository State Change\"],\"resources\":[\"arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:applicationCodeRepo\"],\"detail\":{\"event\":[\"referenceCreated\",\"referenceUpdated\"],\"referenceType\":[\"branch\"],\"referenceName\":[\"main\"]}}"
+            State: "ENABLED"
+            Targets:
+              -
+                Arn: !Sub "arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:HelmUpgradePipelineEKS"
+                Id: "codepipeline-project-GCCI"
+                RoleArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/service-role/cwe-role-${AWS::Region}-HelmUpgradePipelineEKS-gcci"
+            EventBusName: "default"
+
+    SNSTopic:
+        Type: "AWS::SNS::Topic"
+        Properties:
+            TopicName: "ForHelmRepoNotification"
+            KmsMasterKeyId: "alias/aws/sns"
+
+    SNSTopicPolicy:
+        Type: "AWS::SNS::TopicPolicy"
+        Properties:
+            PolicyDocument: !Sub "{\"Version\":\"2008-10-17\",\"Id\":\"__default_policy_ID\",\"Statement\":[{\"Sid\":\"__default_statement_ID\",\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"*\"},\"Action\":[\"SNS:GetTopicAttributes\",\"SNS:SetTopicAttributes\",\"SNS:AddPermission\",\"SNS:RemovePermission\",\"SNS:DeleteTopic\",\"SNS:Subscribe\",\"SNS:ListSubscriptionsByTopic\",\"SNS:Publish\"],\"Resource\":\"${SNSTopic}\",\"Condition\":{\"StringEquals\":{\"AWS:SourceOwner\":\"${AWS::AccountId}\"}}}]}"
+            Topics:
+              - !Ref SNSTopic
+
+    SNSSubscription:
+        Type: "AWS::SNS::Subscription"
+        Properties:
+            TopicArn: !Ref SNSTopic
+            Endpoint: !Ref EMAIL
+            Protocol: "email"
+            Region: !Ref AWS::Region
+
+    SNSTopicForCodeStar:
+        Type: "AWS::SNS::Topic"
+        Properties:
+            TopicName: "ForPipelineNotification"
+            KmsMasterKeyId: "alias/aws/sns"
+
+    SNSTopicPolicyForCodeStar:
+        Type: "AWS::SNS::TopicPolicy"
+        Properties:
+            PolicyDocument: !Sub "{\"Version\":\"2008-10-17\",\"Id\":\"__default_policy_ID\",\"Statement\":[{\"Sid\":\"__default_statement_ID\",\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"*\"},\"Action\":[\"SNS:GetTopicAttributes\",\"SNS:SetTopicAttributes\",\"SNS:AddPermission\",\"SNS:RemovePermission\",\"SNS:DeleteTopic\",\"SNS:Subscribe\",\"SNS:ListSubscriptionsByTopic\",\"SNS:Publish\"],\"Resource\":\"${SNSTopic}\",\"Condition\":{\"StringEquals\":{\"AWS:SourceOwner\":\"${AWS::AccountId}\"}}}]}"
+            Topics:
+              - !Ref SNSTopicForCodeStar
+
+    SNSSubscriptionForCodeStar:
+        Type: "AWS::SNS::Subscription"
+        Properties:
+            TopicArn: !Ref SNSTopicForCodeStar
+            Endpoint: !Ref EMAIL
+            Protocol: "email"
+            Region: !Ref AWS::Region
+
+    CodeCommitRepository:
+        Type: "AWS::CodeCommit::Repository"
+        Properties:
+            RepositoryName: !Ref CodeCommitRepositoryName
+
+    ECRRepository:
+        Type: "AWS::ECR::Repository"
+        Properties:
+            RepositoryName: !Ref ECRRepositoryName
+            ImageScanningConfiguration:
+                ScanOnPush: true
+
+    IAMRolefortestELBController:
+        Type: "AWS::IAM::Role"
+        Properties:
+            Path: "/"
+            RoleName: "AmazonEKSLoadBalancerControllerRoleTEST"
+            AssumeRolePolicyDocument: !Sub "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Federated\":\"arn:aws:iam::${AWS::AccountId}:oidc-provider/oidc.eks.${AWS::Region}.amazonaws.com/id/TEST_OIDC_ARN\"},\"Action\":\"sts:AssumeRoleWithWebIdentity\"}]}"
+            MaxSessionDuration: 3600
+            ManagedPolicyArns:
+              - !Ref IAMManagedPolicyforELBControllerRole
+
+    IAMRoleforprodELBController:
+        Type: "AWS::IAM::Role"
+        Properties:
+            Path: "/"
+            RoleName: "AmazonEKSLoadBalancerControllerRolePROD"
+            AssumeRolePolicyDocument: !Sub "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Federated\":\"arn:aws:iam::${AWS::AccountId}:oidc-provider/oidc.eks.${AWS::Region}.amazonaws.com/id/TEST_OIDC_ARN\"},\"Action\":\"sts:AssumeRoleWithWebIdentity\"}]}"
+            MaxSessionDuration: 3600
+            ManagedPolicyArns:
+              - !Ref IAMManagedPolicyforELBControllerRole
+
+    IAMManagedPolicyforELBControllerRole:
+        Type: "AWS::IAM::ManagedPolicy"
+        Properties:
+            ManagedPolicyName: "AWSLoadBalancerControllerIAMPolicyGCCI"
+            Path: "/"
+            PolicyDocument: |
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Action": "iam:CreateServiceLinkedRole",
+                            "Resource": "*",
+                            "Condition": {
+                                "StringEquals": {
+                                    "iam:AWSServiceName": "elasticloadbalancing.amazonaws.com"
+                                }
+                            }
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "ec2:DescribeAccountAttributes",
+                                "ec2:DescribeAddresses",
+                                "ec2:DescribeAvailabilityZones",
+                                "ec2:DescribeInternetGateways",
+                                "ec2:DescribeVpcs",
+                                "ec2:DescribeVpcPeeringConnections",
+                                "ec2:DescribeSubnets",
+                                "ec2:DescribeSecurityGroups",
+                                "ec2:DescribeInstances",
+                                "ec2:DescribeNetworkInterfaces",
+                                "ec2:DescribeTags",
+                                "ec2:GetCoipPoolUsage",
+                                "ec2:DescribeCoipPools",
+                                "elasticloadbalancing:DescribeLoadBalancers",
+                                "elasticloadbalancing:DescribeLoadBalancerAttributes",
+                                "elasticloadbalancing:DescribeListeners",
+                                "elasticloadbalancing:DescribeListenerCertificates",
+                                "elasticloadbalancing:DescribeSSLPolicies",
+                                "elasticloadbalancing:DescribeRules",
+                                "elasticloadbalancing:DescribeTargetGroups",
+                                "elasticloadbalancing:DescribeTargetGroupAttributes",
+                                "elasticloadbalancing:DescribeTargetHealth",
+                                "elasticloadbalancing:DescribeTags"
+                            ],
+                            "Resource": "*"
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "cognito-idp:DescribeUserPoolClient",
+                                "acm:ListCertificates",
+                                "acm:DescribeCertificate",
+                                "iam:ListServerCertificates",
+                                "iam:GetServerCertificate",
+                                "waf-regional:GetWebACL",
+                                "waf-regional:GetWebACLForResource",
+                                "waf-regional:AssociateWebACL",
+                                "waf-regional:DisassociateWebACL",
+                                "wafv2:GetWebACL",
+                                "wafv2:GetWebACLForResource",
+                                "wafv2:AssociateWebACL",
+                                "wafv2:DisassociateWebACL",
+                                "shield:GetSubscriptionState",
+                                "shield:DescribeProtection",
+                                "shield:CreateProtection",
+                                "shield:DeleteProtection"
+                            ],
+                            "Resource": "*"
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "ec2:AuthorizeSecurityGroupIngress",
+                                "ec2:RevokeSecurityGroupIngress"
+                            ],
+                            "Resource": "*"
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "ec2:CreateSecurityGroup"
+                            ],
+                            "Resource": "*"
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "ec2:CreateTags"
+                            ],
+                            "Resource": "arn:aws:ec2:*:*:security-group/*",
+                            "Condition": {
+                                "StringEquals": {
+                                    "ec2:CreateAction": "CreateSecurityGroup"
+                                },
+                                "Null": {
+                                    "aws:RequestTag/elbv2.k8s.aws/cluster": "false"
+                                }
+                            }
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "ec2:CreateTags",
+                                "ec2:DeleteTags"
+                            ],
+                            "Resource": "arn:aws:ec2:*:*:security-group/*",
+                            "Condition": {
+                                "Null": {
+                                    "aws:RequestTag/elbv2.k8s.aws/cluster": "true",
+                                    "aws:ResourceTag/elbv2.k8s.aws/cluster": "false"
+                                }
+                            }
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "ec2:AuthorizeSecurityGroupIngress",
+                                "ec2:RevokeSecurityGroupIngress",
+                                "ec2:DeleteSecurityGroup"
+                            ],
+                            "Resource": "*",
+                            "Condition": {
+                                "Null": {
+                                    "aws:ResourceTag/elbv2.k8s.aws/cluster": "false"
+                                }
+                            }
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "elasticloadbalancing:CreateLoadBalancer",
+                                "elasticloadbalancing:CreateTargetGroup"
+                            ],
+                            "Resource": "*",
+                            "Condition": {
+                                "Null": {
+                                    "aws:RequestTag/elbv2.k8s.aws/cluster": "false"
+                                }
+                            }
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "elasticloadbalancing:CreateListener",
+                                "elasticloadbalancing:DeleteListener",
+                                "elasticloadbalancing:CreateRule",
+                                "elasticloadbalancing:DeleteRule"
+                            ],
+                            "Resource": "*"
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "elasticloadbalancing:AddTags",
+                                "elasticloadbalancing:RemoveTags"
+                            ],
+                            "Resource": [
+                                "arn:aws:elasticloadbalancing:*:*:targetgroup/*/*",
+                                "arn:aws:elasticloadbalancing:*:*:loadbalancer/net/*/*",
+                                "arn:aws:elasticloadbalancing:*:*:loadbalancer/app/*/*"
+                            ],
+                            "Condition": {
+                                "Null": {
+                                    "aws:RequestTag/elbv2.k8s.aws/cluster": "true",
+                                    "aws:ResourceTag/elbv2.k8s.aws/cluster": "false"
+                                }
+                            }
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "elasticloadbalancing:AddTags",
+                                "elasticloadbalancing:RemoveTags"
+                            ],
+                            "Resource": [
+                                "arn:aws:elasticloadbalancing:*:*:listener/net/*/*/*",
+                                "arn:aws:elasticloadbalancing:*:*:listener/app/*/*/*",
+                                "arn:aws:elasticloadbalancing:*:*:listener-rule/net/*/*/*",
+                                "arn:aws:elasticloadbalancing:*:*:listener-rule/app/*/*/*"
+                            ]
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "elasticloadbalancing:ModifyLoadBalancerAttributes",
+                                "elasticloadbalancing:SetIpAddressType",
+                                "elasticloadbalancing:SetSecurityGroups",
+                                "elasticloadbalancing:SetSubnets",
+                                "elasticloadbalancing:DeleteLoadBalancer",
+                                "elasticloadbalancing:ModifyTargetGroup",
+                                "elasticloadbalancing:ModifyTargetGroupAttributes",
+                                "elasticloadbalancing:DeleteTargetGroup"
+                            ],
+                            "Resource": "*",
+                            "Condition": {
+                                "Null": {
+                                    "aws:ResourceTag/elbv2.k8s.aws/cluster": "false"
+                                }
+                            }
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "elasticloadbalancing:RegisterTargets",
+                                "elasticloadbalancing:DeregisterTargets"
+                            ],
+                            "Resource": "arn:aws:elasticloadbalancing:*:*:targetgroup/*/*"
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "elasticloadbalancing:SetWebAcl",
+                                "elasticloadbalancing:ModifyListener",
+                                "elasticloadbalancing:AddListenerCertificates",
+                                "elasticloadbalancing:RemoveListenerCertificates",
+                                "elasticloadbalancing:ModifyRule"
+                            ],
+                            "Resource": "*"
+                        }
+                    ]
+                }
+
+    IAMRoleForEventBridgeRole:
+        Type: "AWS::IAM::Role"
+        Properties:
+            Path: "/service-role/"
+            RoleName: !Sub "cwe-role-${AWS::Region}-HelmUpgradePipelineEKS-gcci"
+            AssumeRolePolicyDocument: "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"events.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}"
+            MaxSessionDuration: 3600
+            ManagedPolicyArns:
+              - !Ref IAMManagedPolicyForEventRole
+
+    IAMManagedPolicyForEventRole:
+        Type: "AWS::IAM::ManagedPolicy"
+        Properties:
+            ManagedPolicyName: !Sub "start-pipeline-execution-${AWS::Region}-HelmUpgradePipelineEKS"
+            Path: "/service-role/"
+            PolicyDocument: !Sub |
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "codepipeline:StartPipelineExecution"
+                            ],
+                            "Resource": [
+                                "arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:HelmUpgradePipelineEKS"
+                            ]
+                        }
+                    ]
+                }
+
+    IAMManagedPolicyBuildPush1:
+         Type: "AWS::IAM::ManagedPolicy"
+         Properties:
+             ManagedPolicyName: "CodeBuildVpcPolicy-1"
+             Path: "/service-role/"
+             PolicyDocument: !Sub |
+                 {
+                     "Version": "2012-10-17",
+                     "Statement": [
+                         {
+                             "Effect": "Allow",
+                             "Action": [
+                                 "ec2:CreateNetworkInterface",
+                                 "ec2:DescribeDhcpOptions",
+                                 "ec2:DescribeNetworkInterfaces",
+                                 "ec2:DeleteNetworkInterface",
+                                 "ec2:DescribeSubnets",
+                                 "ec2:DescribeSecurityGroups",
+                                 "ec2:DescribeVpcs"
+                             ],
+                             "Resource": "*"
+                         },
+                         {
+                             "Effect": "Allow",
+                             "Action": [
+                                 "ec2:CreateNetworkInterfacePermission"
+                             ],
+                             "Resource": "*"
+                         }
+                     ]
+                 }
+
+    IAMManagedPolicyBuildPush2:
+        Type: "AWS::IAM::ManagedPolicy"
+        Properties:
+            ManagedPolicyName: "CodeBuildCloudWatchLogsPolicy-2"
+            Path: "/service-role/"
+            PolicyDocument: !Sub |
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Resource": "*",
+                            "Action": [
+                                "logs:CreateLogGroup",
+                                "logs:CreateLogStream",
+                                "logs:PutLogEvents"
+                            ]
+                        }
+                    ]
+                }
+
+    IAMManagedPolicyBuildPush3:
+        Type: "AWS::IAM::ManagedPolicy"
+        Properties:
+            ManagedPolicyName: "CodeBuildBasePolicy-3"
+            Path: "/service-role/"
+            PolicyDocument: !Sub |
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Resource": "*",
+                            "Action": [
+                                "logs:CreateLogGroup",
+                                "logs:CreateLogStream",
+                                "logs:PutLogEvents"
+                            ]
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Resource": [
+                                "*"
+                            ],
+                            "Action": [
+                                "s3:PutObject",
+                                "s3:GetObject",
+                                "s3:GetObjectVersion",
+                                "s3:GetBucketAcl",
+                                "s3:GetBucketLocation"
+                            ]
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Resource": "*",
+                            "Action": [
+                                "s3:PutObject",
+                                "s3:GetBucketAcl",
+                                "s3:GetBucketLocation"
+                            ]
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "codebuild:CreateReportGroup",
+                                "codebuild:CreateReport",
+                                "codebuild:UpdateReport",
+                                "codebuild:BatchPutTestCases",
+                                "codebuild:BatchPutCodeCoverages"
+                            ],
+                            "Resource": "*"
+                        }
+                    ]
+                }
+    BuildAndPushRole:
+        Type: "AWS::IAM::Role"
+        Properties:
+            Path: "/service-role/"
+            RoleName: "CodeBuildRoleForBuildPushStage-gcci"
+            AssumeRolePolicyDocument: "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"codebuild.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}"
+            MaxSessionDuration: 3600
+            ManagedPolicyArns:
+              - "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser"
+              - !Ref IAMManagedPolicyBuildPush1
+              - !Ref IAMManagedPolicyBuildPush2
+              - !Ref IAMManagedPolicyBuildPush3
+
+    IAMManagedPolicyforDeployToTest:
+        Type: "AWS::IAM::ManagedPolicy"
+        Properties:
+            ManagedPolicyName: !Sub "CodeBuildVpcPolicy-DeployToTestCluster-1"
+            Path: "/service-role/"
+            PolicyDocument: !Sub |
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "ec2:CreateNetworkInterface",
+                                "ec2:DescribeDhcpOptions",
+                                "ec2:DescribeNetworkInterfaces",
+                                "ec2:DeleteNetworkInterface",
+                                "ec2:DescribeSubnets",
+                                "ec2:DescribeSecurityGroups",
+                                "ec2:DescribeVpcs"
+                            ],
+                            "Resource": "*"
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "ec2:CreateNetworkInterfacePermission"
+                            ],
+                            "Resource": "*"
+                        }
+                    ]
+                }
+
+    IAMManagedPolicyforDeployToTest2:
+        Type: "AWS::IAM::ManagedPolicy"
+        Properties:
+            ManagedPolicyName: !Sub "CodeBuildBasePolicy-DeployToTestCluster-2"
+            Path: "/service-role/"
+            PolicyDocument: !Sub |
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Resource": "*",
+                            "Action": [
+                                "logs:CreateLogGroup",
+                                "logs:CreateLogStream",
+                                "logs:PutLogEvents"
+                            ]
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Resource": "*",
+                            "Action": [
+                                "s3:PutObject",
+                                "s3:GetObject",
+                                "s3:GetObjectVersion",
+                                "s3:GetBucketAcl",
+                                "s3:GetBucketLocation"
+                            ]
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "codebuild:CreateReportGroup",
+                                "codebuild:CreateReport",
+                                "codebuild:UpdateReport",
+                                "codebuild:BatchPutTestCases",
+                                "codebuild:BatchPutCodeCoverages"
+                            ],
+                            "Resource": "*"
+                        }
+                    ]
+                }
+
+    IAMManagedPolicyforDeployToTest3:
+        Type: "AWS::IAM::ManagedPolicy"
+        Properties:
+            ManagedPolicyName: !Sub "CodeBuildSts-DeployToTestCluster-3"
+            Path: "/service-role/"
+            PolicyDocument: !Sub |
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Action": "sts:*",
+                            "Resource": "*"
+                        }
+                    ]
+                }
+
+    DeployToTestRole:
+        Type: "AWS::IAM::Role"
+        Properties:
+            Path: "/service-role/"
+            RoleName: "codebuild-DeployToTestCluster-service-role-gcci"
+            AssumeRolePolicyDocument: "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"codebuild.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}"
+            MaxSessionDuration: 3600
+            ManagedPolicyArns:
+              - "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser"
+              - !Ref IAMManagedPolicyforDeployToTest
+              - !Ref IAMManagedPolicyforDeployToTest2
+              - !Ref IAMManagedPolicyforDeployToTest3
+
+    IAMManagedPolicyforDeployToProd:
+        Type: "AWS::IAM::ManagedPolicy"
+        Properties:
+            ManagedPolicyName: !Sub "CodeBuildVpcPolicy-DeployToProdCluster-1"
+            Path: "/service-role/"
+            PolicyDocument: !Sub |
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "ec2:CreateNetworkInterface",
+                                "ec2:DescribeDhcpOptions",
+                                "ec2:DescribeNetworkInterfaces",
+                                "ec2:DeleteNetworkInterface",
+                                "ec2:DescribeSubnets",
+                                "ec2:DescribeSecurityGroups",
+                                "ec2:DescribeVpcs"
+                            ],
+                            "Resource": "*"
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "ec2:CreateNetworkInterfacePermission"
+                            ],
+                            "Resource": "*"
+                        }
+                    ]
+                }
+
+    IAMManagedPolicyforDeployToProd2:
+        Type: "AWS::IAM::ManagedPolicy"
+        Properties:
+            ManagedPolicyName: !Sub "CodeBuildBasePolicy-DeployToProdCluster-2"
+            Path: "/service-role/"
+            PolicyDocument: !Sub |
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Resource": "*",
+                            "Action": [
+                                "logs:CreateLogGroup",
+                                "logs:CreateLogStream",
+                                "logs:PutLogEvents"
+                            ]
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Resource": "*",
+                            "Action": [
+                                "s3:PutObject",
+                                "s3:GetObject",
+                                "s3:GetObjectVersion",
+                                "s3:GetBucketAcl",
+                                "s3:GetBucketLocation"
+                            ]
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "codebuild:CreateReportGroup",
+                                "codebuild:CreateReport",
+                                "codebuild:UpdateReport",
+                                "codebuild:BatchPutTestCases",
+                                "codebuild:BatchPutCodeCoverages"
+                            ],
+                            "Resource": "*"
+                        }
+                    ]
+                }
+
+    IAMManagedPolicyforDeployToProd3:
+        Type: "AWS::IAM::ManagedPolicy"
+        Properties:
+            ManagedPolicyName: !Sub "CodeBuildSts-DeployToProdCluster-3"
+            Path: "/service-role/"
+            PolicyDocument: !Sub |
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Action": "sts:*",
+                            "Resource": "*"
+                        }
+                    ]
+                }
+
+    DeployToProdRole:
+        Type: "AWS::IAM::Role"
+        Properties:
+            Path: "/service-role/"
+            RoleName: "codebuild-DeployToProdCluster-service-role-gcci"
+            AssumeRolePolicyDocument: "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"codebuild.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}"
+            MaxSessionDuration: 3600
+            ManagedPolicyArns:
+              - "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser"
+              - !Ref IAMManagedPolicyforDeployToProd
+              - !Ref IAMManagedPolicyforDeployToProd2
+              - !Ref IAMManagedPolicyforDeployToProd3
+
+    IAMRolePipeline:
+        Type: "AWS::IAM::Role"
+        Properties:
+            Path: "/service-role/"
+            RoleName: !Sub "gcciAWSCodePipelineServiceRole-${AWS::Region}-Pipeline-GCCI"
+            AssumeRolePolicyDocument: "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"codepipeline.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}"
+            MaxSessionDuration: 3600
+            ManagedPolicyArns:
+              - !Ref IAMManagedPolicyForPipeline
+
+    IAMManagedPolicyForPipeline:
+        Type: "AWS::IAM::ManagedPolicy"
+        Properties:
+            ManagedPolicyName: !Sub "AWSCodePipelineServiceRole-${AWS::Region}-pipeine-gcci"
+            Path: "/service-role/"
+            PolicyDocument: |
+                {
+                    "Statement": [
+                        {
+                            "Action": [
+                                "iam:PassRole"
+                            ],
+                            "Resource": "*",
+                            "Effect": "Allow",
+                            "Condition": {
+                                "StringEqualsIfExists": {
+                                    "iam:PassedToService": [
+                                        "cloudformation.amazonaws.com",
+                                        "elasticbeanstalk.amazonaws.com",
+                                        "ec2.amazonaws.com",
+                                        "ecs-tasks.amazonaws.com"
+                                    ]
+                                }
+                            }
+                        },
+                        {
+                            "Action": [
+                                "codecommit:CancelUploadArchive",
+                                "codecommit:GetBranch",
+                                "codecommit:GetCommit",
+                                "codecommit:GetRepository",
+                                "codecommit:GetUploadArchiveStatus",
+                                "codecommit:UploadArchive"
+                            ],
+                            "Resource": "*",
+                            "Effect": "Allow"
+                        },
+                        {
+                            "Action": [
+                                "codedeploy:CreateDeployment",
+                                "codedeploy:GetApplication",
+                                "codedeploy:GetApplicationRevision",
+                                "codedeploy:GetDeployment",
+                                "codedeploy:GetDeploymentConfig",
+                                "codedeploy:RegisterApplicationRevision"
+                            ],
+                            "Resource": "*",
+                            "Effect": "Allow"
+                        },
+                        {
+                            "Action": [
+                                "codestar-connections:UseConnection"
+                            ],
+                            "Resource": "*",
+                            "Effect": "Allow"
+                        },
+                        {
+                            "Action": [
+                                "elasticbeanstalk:*",
+                                "ec2:*",
+                                "elasticloadbalancing:*",
+                                "autoscaling:*",
+                                "cloudwatch:*",
+                                "s3:*",
+                                "sns:*",
+                                "cloudformation:*",
+                                "rds:*",
+                                "sqs:*",
+                                "ecs:*"
+                            ],
+                            "Resource": "*",
+                            "Effect": "Allow"
+                        },
+                        {
+                            "Action": [
+                                "lambda:InvokeFunction",
+                                "lambda:ListFunctions"
+                            ],
+                            "Resource": "*",
+                            "Effect": "Allow"
+                        },
+                        {
+                            "Action": [
+                                "opsworks:CreateDeployment",
+                                "opsworks:DescribeApps",
+                                "opsworks:DescribeCommands",
+                                "opsworks:DescribeDeployments",
+                                "opsworks:DescribeInstances",
+                                "opsworks:DescribeStacks",
+                                "opsworks:UpdateApp",
+                                "opsworks:UpdateStack"
+                            ],
+                            "Resource": "*",
+                            "Effect": "Allow"
+                        },
+                        {
+                            "Action": [
+                                "cloudformation:CreateStack",
+                                "cloudformation:DeleteStack",
+                                "cloudformation:DescribeStacks",
+                                "cloudformation:UpdateStack",
+                                "cloudformation:CreateChangeSet",
+                                "cloudformation:DeleteChangeSet",
+                                "cloudformation:DescribeChangeSet",
+                                "cloudformation:ExecuteChangeSet",
+                                "cloudformation:SetStackPolicy",
+                                "cloudformation:ValidateTemplate"
+                            ],
+                            "Resource": "*",
+                            "Effect": "Allow"
+                        },
+                        {
+                            "Action": [
+                                "codebuild:BatchGetBuilds",
+                                "codebuild:StartBuild",
+                                "codebuild:BatchGetBuildBatches",
+                                "codebuild:StartBuildBatch"
+                            ],
+                            "Resource": "*",
+                            "Effect": "Allow"
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "devicefarm:ListProjects",
+                                "devicefarm:ListDevicePools",
+                                "devicefarm:GetRun",
+                                "devicefarm:GetUpload",
+                                "devicefarm:CreateUpload",
+                                "devicefarm:ScheduleRun"
+                            ],
+                            "Resource": "*"
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "servicecatalog:ListProvisioningArtifacts",
+                                "servicecatalog:CreateProvisioningArtifact",
+                                "servicecatalog:DescribeProvisioningArtifact",
+                                "servicecatalog:DeleteProvisioningArtifact",
+                                "servicecatalog:UpdateProduct"
+                            ],
+                            "Resource": "*"
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "cloudformation:ValidateTemplate"
+                            ],
+                            "Resource": "*"
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "ecr:DescribeImages"
+                            ],
+                            "Resource": "*"
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "states:DescribeExecution",
+                                "states:DescribeStateMachine",
+                                "states:StartExecution"
+                            ],
+                            "Resource": "*"
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "appconfig:StartDeployment",
+                                "appconfig:StopDeployment",
+                                "appconfig:GetDeployment"
+                            ],
+                            "Resource": "*"
+                        }
+                    ],
+                    "Version": "2012-10-17"
+                }
+
+
+    CodeBuildProject1:
+        Type: "AWS::CodeBuild::Project"
+        Properties:
+            Name: "BuildAndPush"
+            Description: "Build container image and Helm in this step"
+            Source:
+                BuildSpec: "BuildAndPush.yml"
+                InsecureSsl: false
+                Type: "CODEPIPELINE"
+            Artifacts:
+                EncryptionDisabled: false
+                Name: "BuildAndPush"
+                Packaging: "NONE"
+                Type: "CODEPIPELINE"
+            Cache:
+                Type: "NO_CACHE"
+            Environment:
+                ComputeType: "BUILD_GENERAL1_MEDIUM"
+                EnvironmentVariables:
+                  -
+                    Name: "AWS_DEFAULT_REGION"
+                    Type: "PLAINTEXT"
+                    Value: !Ref AWS::Region
+                  -
+                    Name: "AWS_ACCOUNT_ID"
+                    Type: "PLAINTEXT"
+                    Value: !Ref AWS::AccountId
+                  -
+                    Name: "IMAGE_TAG"
+                    Type: "PLAINTEXT"
+                    Value: "test"
+                  -
+                    Name: "IMAGE_REPO_NAME"
+                    Type: "PLAINTEXT"
+                    Value: !GetAtt ECRRepository.RepositoryUri
+                Image: "aws/codebuild/amazonlinux2-x86_64-standard:4.0"
+                ImagePullCredentialsType: "CODEBUILD"
+                PrivilegedMode: true
+                Type: "LINUX_CONTAINER"
+            ServiceRole: !GetAtt BuildAndPushRole.Arn
+            TimeoutInMinutes: 60
+            QueuedTimeoutInMinutes: 480
+            EncryptionKey: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/s3"
+            VpcConfig: {}
+            BadgeEnabled: false
+            LogsConfig:
+                CloudWatchLogs:
+                    Status: "ENABLED"
+                S3Logs:
+                    Status: "DISABLED"
+                    EncryptionDisabled: false
+            Visibility: "PRIVATE"
+
+
+    CodeBuildProject2:
+        Type: "AWS::CodeBuild::Project"
+        Properties:
+            Name: "DeployToTestCluster"
+            Description: "This will install helm chart to TEST cluster"
+            Source:
+                BuildSpec: "DeployToTest.yml"
+                InsecureSsl: false
+                Type: "CODEPIPELINE"
+            Artifacts:
+                EncryptionDisabled: false
+                Name: "DeployToTestCluster"
+                Packaging: "NONE"
+                Type: "CODEPIPELINE"
+            Cache:
+                Type: "NO_CACHE"
+            Environment:
+                ComputeType: "BUILD_GENERAL1_SMALL"
+                EnvironmentVariables:
+                  -
+                    Name: "EKS_KUBECTL_ROLE_ARN"
+                    Type: "PLAINTEXT"
+                    Value: !Ref RoleARNForTestEKSCluster
+                  -
+                    Name: "AWS_DEFAULT_REGION"
+                    Type: "PLAINTEXT"
+                    Value: !Ref AWS::Region
+                  -
+                    Name: "AWS_CLUSTER_NAME"
+                    Type: "PLAINTEXT"
+                    Value: !Ref TestEKSClusterName
+                Image: "aws/codebuild/amazonlinux2-x86_64-standard:4.0"
+                ImagePullCredentialsType: "CODEBUILD"
+                PrivilegedMode: true
+                Type: "LINUX_CONTAINER"
+            ServiceRole: !GetAtt DeployToTestRole.Arn
+            TimeoutInMinutes: 60
+            QueuedTimeoutInMinutes: 480
+            EncryptionKey: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/s3"
+            VpcConfig: {}
+            BadgeEnabled: false
+            LogsConfig:
+                CloudWatchLogs:
+                    Status: "ENABLED"
+                S3Logs:
+                    Status: "DISABLED"
+                    EncryptionDisabled: false
+            Visibility: "PRIVATE"
+
+    CodeBuildProject3:
+        Type: "AWS::CodeBuild::Project"
+        Properties:
+            Name: "DeployToProdCluster"
+            Source:
+                BuildSpec: "DeployToProd.yml"
+                InsecureSsl: false
+                Type: "CODEPIPELINE"
+            Artifacts:
+                EncryptionDisabled: false
+                Name: "DeployToProdCluster"
+                Packaging: "NONE"
+                Type: "CODEPIPELINE"
+            Cache:
+                Type: "NO_CACHE"
+            Environment:
+                ComputeType: "BUILD_GENERAL1_SMALL"
+                EnvironmentVariables:
+                  -
+                    Name: "EKS_KUBECTL_ROLE_ARN"
+                    Type: "PLAINTEXT"
+                    Value: !Ref RoleARNForProdEKSCluster
+                  -
+                    Name: "ECR_REPO_URI"
+                    Type: "PLAINTEXT"
+                    Value: !GetAtt ECRRepository.RepositoryUri
+                  -
+                    Name: "AWS_PROD_REGION"
+                    Type: "PLAINTEXT"
+                    Value: !Ref ProdRegion
+                  -
+                    Name: "AWS_CLUSTER_NAME_PROD"
+                    Type: "PLAINTEXT"
+                    Value: !Ref ProdEKSClusterName
+                Image: "aws/codebuild/amazonlinux2-x86_64-standard:4.0"
+                ImagePullCredentialsType: "CODEBUILD"
+                PrivilegedMode: true
+                Type: "LINUX_CONTAINER"
+            ServiceRole: !GetAtt DeployToProdRole.Arn
+            TimeoutInMinutes: 60
+            QueuedTimeoutInMinutes: 480
+            EncryptionKey: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/s3"
+            VpcConfig: {}
+            BadgeEnabled: false
+            LogsConfig:
+                CloudWatchLogs:
+                    Status: "ENABLED"
+                S3Logs:
+                    Status: "DISABLED"
+                    EncryptionDisabled: false
+            Visibility: "PRIVATE"
+
+    CodeStarNotificationsNotificationRule:
+        Type: "AWS::CodeStarNotifications::NotificationRule"
+        Properties:
+            DetailType: "FULL"
+            EventTypeIds:
+              - "codepipeline-pipeline-pipeline-execution-succeeded"
+              - "codepipeline-pipeline-action-execution-succeeded"
+              - "codepipeline-pipeline-manual-approval-succeeded"
+              - "codepipeline-pipeline-pipeline-execution-failed"
+              - "codepipeline-pipeline-action-execution-failed"
+              - "codepipeline-pipeline-manual-approval-failed"
+            Name: "PipelineGCCIHelmRelease"
+            Resource: !Sub "arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:HelmUpgradePipelineEKS"
+            Status: "ENABLED"
+            Targets:
+              -
+                TargetAddress: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:ForPipelineNotification"
+                TargetType: "SNS"
+
+    CodePipelinePipeline:
+        Type: "AWS::CodePipeline::Pipeline"
+        Properties:
+            Name: "HelmUpgradePipelineEKS"
+            RoleArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/service-role/gcciAWSCodePipelineServiceRole-${AWS::Region}-Pipeline-GCCI"
+            ArtifactStore:
+                Location: !Ref S3BucketPipeline
+                Type: "S3"
+            Stages:
+              -
+                Name: "Source"
+                Actions:
+                  -
+                    Name: "Source"
+                    ActionTypeId:
+                        Category: "Source"
+                        Owner: "AWS"
+                        Provider: "CodeCommit"
+                        Version: "1"
+                    Configuration:
+                        BranchName: "main"
+                        OutputArtifactFormat: "CODE_ZIP"
+                        PollForSourceChanges: "false"
+                        RepositoryName: !GetAtt CodeCommitRepository.Name
+                    OutputArtifacts:
+                      -
+                        Name: "SourceArtifact"
+                    Region: !Ref AWS::Region
+                    Namespace: "SourceVariables"
+                    RunOrder: 1
+              -
+                Name: "Build"
+                Actions:
+                  -
+                    Name: "Build"
+                    ActionTypeId:
+                        Category: "Build"
+                        Owner: "AWS"
+                        Provider: "CodeBuild"
+                        Version: "1"
+                    Configuration:
+                        BatchEnabled: "false"
+                        ProjectName: !Ref CodeBuildProject1
+                    InputArtifacts:
+                      -
+                        Name: "SourceArtifact"
+                    OutputArtifacts:
+                      -
+                        Name: "BuildArtifact"
+                    Region: !Ref AWS::Region
+                    Namespace: "BuildVariablesECR"
+                    RunOrder: 1
+              -
+                Name: "DeployToTest"
+                Actions:
+                  -
+                    Name: "DeployToTest"
+                    ActionTypeId:
+                        Category: "Build"
+                        Owner: "AWS"
+                        Provider: "CodeBuild"
+                        Version: "1"
+                    Configuration:
+                        EnvironmentVariables: "[{\"name\":\"IMAGE_TAG_NODE\",\"value\":\"#{BuildVariablesECR.IMAGE_TAG_NODE}\",\"type\":\"PLAINTEXT\"},{\"name\":\"IMAGE_TAG_CRYS\",\"value\":\"#{BuildVariablesECR.IMAGE_TAG_CRYS}\",\"type\":\"PLAINTEXT\"},{\"name\":\"IMAGE_TAG_FRONT\",\"value\":\"#{BuildVariablesECR.IMAGE_TAG_FRONT}\",\"type\":\"PLAINTEXT\"},{\"name\":\"REPO_URI\",\"value\":\"#{BuildVariablesECR.IMAGE_REPO_NAME}\",\"type\":\"PLAINTEXT\"}]"
+                        ProjectName: !Ref CodeBuildProject2
+                    InputArtifacts:
+                      -
+                        Name: "SourceArtifact"
+                    Region: !Ref AWS::Region
+                    Namespace: "DeploytoTestPhase"
+                    RunOrder: 1
+              -
+                Name: "ManualApprovalForPROD"
+                Actions:
+                  -
+                    Name: "Manual_Approval"
+                    ActionTypeId:
+                        Category: "Approval"
+                        Owner: "AWS"
+                        Provider: "Manual"
+                        Version: "1"
+                    Configuration:
+                        CustomData: "Check above BOSS"
+                        ExternalEntityLink: "http://#{DeploytoTestPhase.ELB_URL}"
+                        NotificationArn: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:ForHelmRepoNotification"
+                    Region: !Ref AWS::Region
+                    RunOrder: 1
+              -
+                Name: "DeployToProd"
+                Actions:
+                  -
+                    Name: "DeployToProd"
+                    ActionTypeId:
+                        Category: "Build"
+                        Owner: "AWS"
+                        Provider: "CodeBuild"
+                        Version: "1"
+                    Configuration:
+                        EnvironmentVariables: "[{\"name\":\"IMAGE_TAG_NODE\",\"value\":\"#{BuildVariablesECR.IMAGE_TAG_NODE}\",\"type\":\"PLAINTEXT\"},{\"name\":\"IMAGE_TAG_CRYS\",\"value\":\"#{BuildVariablesECR.IMAGE_TAG_CRYS}\",\"type\":\"PLAINTEXT\"},{\"name\":\"IMAGE_TAG_FRONT\",\"value\":\"#{BuildVariablesECR.IMAGE_TAG_FRONT}\",\"type\":\"PLAINTEXT\"},{\"name\":\"REPO_URI\",\"value\":\"#{BuildVariablesECR.IMAGE_REPO_NAME}\",\"type\":\"PLAINTEXT\"}]"
+                        ProjectName: !Ref CodeBuildProject3
+                    InputArtifacts:
+                      -
+                        Name: "SourceArtifact"
+                    Region: !Ref AWS::Region
+                    RunOrder: 1
+Outputs:
+    CodeCommitRepoCloneURLHTTPS:
+        Description: This is your code commit repo CLONE URL using HTTPS which can be passed to git remote add origin
+        Value: !GetAtt CodeCommitRepository.CloneUrlHttp
+    ECRRepositoryURI:
+        Description: ECR Repository URI
+        Value: !GetAtt ECRRepository.RepositoryUri
+    TESTROLEALB:
+        Description: Role For test ALB Controller
+        Value: !GetAtt IAMRolefortestELBController.Arn
+    PRODROLEALB:
+        Description: Role For prod ALB Controller
+        Value: !GetAtt IAMRoleforprodELBController.Arn
